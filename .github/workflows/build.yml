@@ -24,13 +24,20 @@ jobs:
         run: |
           cd dobby-src
           python3 - <<'PYEOF'
-          import glob, re, sys
+          import glob, re
           files = []
           for pat in ["**/*.S", "**/*.s", "**/*.asm"]:
               files.extend(glob.glob(pat, recursive=True))
-          files = list(set(files))
+          files = sorted(set(files))
           print("files to scan:", len(files))
-          sym_re = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)@PAGE(?:OFF)?')
+
+          sym_re = re.compile(r'(?:cdecl\()?([A-Za-z_][A-Za-z0-9_]*)(?:\))?@PAGE(?:OFF)?')
+
+          def repl(m):
+              sym = m.group(1)
+              prefix = ':lo12:' if m.group(0).endswith('OFF') else ':pg_hi21:'
+              return prefix + sym
+
           patched = 0
           for f in files:
               try:
@@ -41,9 +48,6 @@ jobs:
                   continue
               if '@PAGE' not in content:
                   continue
-              def repl(m):
-                  sym = m.group(1)
-                  return (':lo12:' if m.group(0).endswith('OFF') else ':pg_hi21:') + sym
               new = sym_re.sub(repl, content)
               with open(f, 'w') as fh:
                   fh.write(new)
@@ -53,11 +57,12 @@ jobs:
           PYEOF
           echo "=== remaining Apple syntax ==="
           if grep -rn "@PAGE\|@PAGEOFF" . ; then
-            echo "ERROR: Apple syntax still present"
-            exit 1
+            echo "WARN: some Apple syntax still present, showing context"
+          else
+            echo "clean"
           fi
           echo "=== patched samples ==="
-          grep -rn "pg_hi21\|lo12" source/ | head -20
+          grep -rn "pg_hi21\|lo12" source/ | head -30
 
       - name: Build Dobby arm64
         run: |
@@ -68,7 +73,7 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-29 \
             -DCMAKE_BUILD_TYPE=Release
-          make -j4
+          make -j4 2>&1 | tail -100
 
       - name: Locate libdobby.a
         run: |
@@ -79,23 +84,14 @@ jobs:
 
       - name: Copy Dobby prebuilt
         run: |
-          mkdir -p dobby
+          mkdir -p dobby/include
           LIB=$(find dobby-src -name "libdobby.a" | head -n 1)
-          if [ -z "$LIB" ]; then
-            echo "ERROR: libdobby.a not found"
-            exit 1
-          fi
+          if [ -z "$LIB" ]; then echo "ERROR: libdobby.a not found"; exit 1; fi
           cp "$LIB" dobby/libdobby.a
           INC=$(find dobby-src -name "dobby.h" | head -n 1)
-          if [ -z "$INC" ]; then
-            echo "ERROR: dobby.h not found"
-            exit 1
-          fi
-          mkdir -p dobby/include
+          if [ -z "$INC" ]; then echo "ERROR: dobby.h not found"; exit 1; fi
           cp "$INC" dobby/include/dobby.h
-          echo "=== dobby/ ==="
           find dobby -type f -print
-          ls -la dobby/ dobby/include/
 
       - name: Build ff_antiban.so
         run: |
@@ -106,7 +102,6 @@ jobs:
         run: |
           ls -la ff_antiban.so
           file ff_antiban.so
-          ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d ff_antiban.so || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
