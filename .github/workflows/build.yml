@@ -29,42 +29,24 @@ jobs:
           for pat in ["**/*.S", "**/*.s", "**/*.asm"]:
               files.extend(glob.glob(pat, recursive=True))
           files = sorted(set(files))
-          print("files to scan:", len(files))
-
           sym_re = re.compile(r'(?:cdecl\()?([A-Za-z_][A-Za-z0-9_]*)(?:\))?@PAGE(?:OFF)?')
-
           def repl(m):
               sym = m.group(1)
               prefix = ':lo12:' if m.group(0).endswith('OFF') else ':pg_hi21:'
               return prefix + sym
-
-          patched = 0
           for f in files:
-              try:
-                  with open(f, 'r', errors='ignore') as fh:
-                      content = fh.read()
-              except Exception as e:
-                  print("skip", f, e)
-                  continue
+              with open(f, 'r', errors='ignore') as fh:
+                  content = fh.read()
               if '@PAGE' not in content:
                   continue
               new = sym_re.sub(repl, content)
               with open(f, 'w') as fh:
                   fh.write(new)
               print("patched:", f)
-              patched += 1
-          print("total patched:", patched)
           PYEOF
-          echo "=== remaining Apple syntax ==="
-          if grep -rn "@PAGE\|@PAGEOFF" . ; then
-            echo "WARN: some Apple syntax still present, showing context"
-          else
-            echo "clean"
-          fi
-          echo "=== patched samples ==="
-          grep -rn "pg_hi21\|lo12" source/ | head -30
+          grep -rn "@PAGE\|@PAGEOFF" . && echo "WARN: apple syntax remains" || echo "clean"
 
-      - name: Build Dobby arm64
+      - name: Configure Dobby
         run: |
           cd dobby-src
           mkdir -p build && cd build
@@ -72,22 +54,38 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-29 \
-            -DCMAKE_BUILD_TYPE=Release
-          make -j4 2>&1 | tail -100
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDOBBY_GENERATE_SHARED=OFF \
+            2>&1 | tail -80
+          echo "=== CMakeCache summary ==="
+          grep -iE "BUILD_SHARED|STATIC|DOBBY" CMakeCache.txt | head -40
 
-      - name: Locate libdobby.a
+      - name: Build Dobby arm64
         run: |
-          echo "=== search libdobby.a ==="
-          find dobby-src -name "libdobby.a" -print
-          echo "=== search dobby.h ==="
+          cd dobby-src/build
+          make -j4 2>&1 | tail -150
+
+      - name: Locate Dobby outputs
+        run: |
+          echo "=== all .a ==="
+          find dobby-src -name "*.a" -print
+          echo "=== all .so ==="
+          find dobby-src -name "*.so" -print
+          echo "=== dobby.h ==="
           find dobby-src -name "dobby.h" -print
+          echo "=== build tree top ==="
+          ls -la dobby-src/build/ 2>/dev/null
+          echo "=== recent files ==="
+          find dobby-src/build -newer dobby-src/CMakeLists.txt -type f -print 2>/dev/null | head -40
 
       - name: Copy Dobby prebuilt
         run: |
           mkdir -p dobby/include
-          LIB=$(find dobby-src -name "libdobby.a" | head -n 1)
-          if [ -z "$LIB" ]; then echo "ERROR: libdobby.a not found"; exit 1; fi
-          cp "$LIB" dobby/libdobby.a
+          LIB=$(find dobby-src -name "libdobby*.a" | head -n 1)
+          if [ -z "$LIB" ]; then LIB=$(find dobby-src -name "libdobby*.so" | head -n 1); fi
+          if [ -z "$LIB" ]; then echo "ERROR: no dobby library"; exit 1; fi
+          echo "picked lib: $LIB"
+          cp "$LIB" dobby/
           INC=$(find dobby-src -name "dobby.h" | head -n 1)
           if [ -z "$INC" ]; then echo "ERROR: dobby.h not found"; exit 1; fi
           cp "$INC" dobby/include/dobby.h
