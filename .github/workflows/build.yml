@@ -15,42 +15,16 @@ jobs:
         with:
           ndk-version: r25c
 
-      - name: Download prebuilt Dobby
+      - name: Clone Dobby
         run: |
-          set -e
-          mkdir -p dobby/include
-          cd /tmp
-
-          # Thử lần lượt các nguồn prebuilt
-          OK=0
-
-          # Nguồn 1: repo Android-Dobby có sẵn libdobby.a cho arm64
-          if [ "$OK" = "0" ]; then
-            echo "=== trying source 1: Android-Dobby ==="
-            git clone --depth 1 https://github.com/leanflutter/dobby.git /tmp/dobby-src 2>/dev/null || true
-            if [ -d /tmp/dobby-src ]; then
-              find /tmp/dobby-src -name "libdobby*.a" -print
-              find /tmp/dobby-src -name "dobby.h" -print
-            fi
-          fi
-
-          # Nguồn 2: tải release asset từ jmpews/Dobby
-          if [ "$OK" = "0" ]; then
-            echo "=== trying source 2: jmpews releases ==="
-            curl -sL "https://api.github.com/repos/jmpews/Dobby/releases" | head -100 || true
-          fi
-
-          echo "=== done probing ==="
-          ls -la /tmp/dobby-src 2>/dev/null || true
-
-      - name: Fallback — build Dobby with cmake options fix
-        run: |
-          set -e
           git clone --depth 1 https://github.com/jmpews/Dobby.git dobby-src
           cd dobby-src
           git submodule update --init --recursive
+          git log -1 --oneline
 
-          # Patch asm
+      - name: Patch Dobby asm Apple to Clang ARM64
+        run: |
+          cd dobby-src
           python3 - <<'PYEOF'
           import glob, re
           files = []
@@ -60,8 +34,9 @@ jobs:
           sym_re = re.compile(r'(?:cdecl\()?([A-Za-z_][A-Za-z0-9_]*)(?:\))?@PAGE(?:OFF)?')
           def repl(m):
               sym = m.group(1)
-              prefix = ':lo12:' if m.group(0).endswith('OFF') else ':pg_hi21:'
-              return prefix + sym
+              if m.group(0).endswith('OFF'):
+                  return ':lo12:' + sym
+              return sym
           for f in files:
               with open(f, 'r', errors='ignore') as fh:
                   content = fh.read()
@@ -72,16 +47,14 @@ jobs:
                   fh.write(new)
               print("patched:", f)
           PYEOF
+          echo "=== verify ==="
+          grep -rn "@PAGE\|@PAGEOFF" . && echo "WARN remains" || echo "clean"
+          echo "=== sample after patch ==="
+          grep -n "adrp\|:lo12:" source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm | head -20
 
-          # Debug: xem repo có gì
-          echo "=== source .cpp count ==="
-          find source -name "*.cpp" -o -name "*.cc" | wc -l
-          echo "=== source dirs ==="
-          find source -maxdepth 2 -type d | head -30
-          echo "=== auto_source_group macro ==="
-          grep -B2 -A 30 "auto_source_group" cmake/Macros.cmake | head -60
-
-          # Config với BUILD_SHARED_LIBS=OFF
+      - name: Configure Dobby
+        run: |
+          cd dobby-src
           mkdir -p build && cd build
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
@@ -90,42 +63,44 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF
 
-          echo "=== dobby_static build.make head ==="
-          head -120 CMakeFiles/dobby_static.dir/build.make 2>/dev/null || echo "no build.make"
-
-          echo "=== make dobby_static verbose ==="
-          make dobby_static VERBOSE=1 -j4 2>&1 | tail -200 || true
-
+      - name: Build Dobby static
+        run: |
+          cd dobby-src/build
+          make -j4 dobby_static 2>&1 | tail -200
           echo ""
-          echo "=== find all .a ==="
+          echo "=== all .a after build ==="
           find .. -name "*.a" -print
-          echo "=== find all .so ==="
+          echo "=== all .so after build ==="
           find .. -name "*.so" -print
 
-      - name: Copy Dobby artifacts
+      - name: Locate Dobby outputs
+        if: always()
+        run: |
+          echo "=== .a ==="
+          find dobby-src -name "*.a" -print
+          echo "=== .so ==="
+          find dobby-src -name "*.so" -print
+          echo "=== dobby.h ==="
+          find dobby-src -name "dobby.h" -print
+
+      - name: Copy Dobby prebuilt
         if: always()
         run: |
           mkdir -p dobby/include
-          LIB=$(find dobby-src -name "libdobby*.a" 2>/dev/null | head -n 1)
+          LIB=$(find dobby-src -name "libdobby*.a" | head -n 1)
           if [ -z "$LIB" ]; then
-            LIB=$(find /tmp/dobby-src -name "libdobby*.a" 2>/dev/null | head -n 1)
+            LIB=$(find dobby-src -name "libdobby*.so" | head -n 1)
           fi
           if [ -z "$LIB" ]; then
-            echo "ERROR: no libdobby.a"
+            echo "ERROR: no library found"
+            find dobby-src -name "*.a" -print
             exit 1
           fi
-          cp "$LIB" dobby/libdobby.a
-
-          INC=$(find dobby-src -name "dobby.h" 2>/dev/null | head -n 1)
-          if [ -z "$INC" ]; then
-            INC=$(find /tmp/dobby-src -name "dobby.h" 2>/dev/null | head -n 1)
-          fi
-          if [ -z "$INC" ]; then
-            echo "ERROR: no dobby.h"
-            exit 1
-          fi
+          echo "picked: $LIB"
+          cp "$LIB" dobby/
+          INC=$(find dobby-src -name "dobby.h" | head -n 1)
+          if [ -z "$INC" ]; then echo "ERROR: no dobby.h"; exit 1; fi
           cp "$INC" dobby/include/dobby.h
-
           find dobby -type f -print
 
       - name: Build ff_antiban.so
