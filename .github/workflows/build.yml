@@ -1,9 +1,10 @@
-name: Probe Dobby
+name: Build ff_antiban
 on:
+  push:
   workflow_dispatch:
 
 jobs:
-  probe:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,22 +15,46 @@ jobs:
         with:
           ndk-version: r25c
 
-      - name: Clone and inspect Dobby
+      - name: Clone Dobby
         run: |
-          git clone https://github.com/jmpews/Dobby.git dobby-src
+          git clone --depth 1 https://github.com/jmpews/Dobby.git dobby-src
           cd dobby-src
-          echo "=== tags ==="
-          git tag | tail -30
-          echo "=== latest commit ==="
+          echo "=== commit ==="
           git log -1 --oneline
-          echo "=== CMakeLists.txt top 60 lines ==="
+          echo "=== CMakeLists head 60 ==="
           head -60 CMakeLists.txt
-          echo "=== cmake directory ==="
-          ls -la cmake/ 2>/dev/null || echo "no cmake dir"
           echo "=== Android.mk? ==="
-          find . -maxdepth 2 -name "Android.mk" -o -name "*.gradle" | head -10
+          find . -maxdepth 3 -name "Android.mk" -print
+          echo "=== cmake dir? ==="
+          ls -la cmake/ 2>/dev/null || echo "none"
 
-      - name: Configure Dobby verbose
+      - name: Patch Dobby asm Apple to GNU
+        run: |
+          cd dobby-src
+          python3 - <<'PYEOF'
+          import glob, re
+          files = []
+          for pat in ["**/*.S", "**/*.s", "**/*.asm"]:
+              files.extend(glob.glob(pat, recursive=True))
+          files = sorted(set(files))
+          sym_re = re.compile(r'(?:cdecl\()?([A-Za-z_][A-Za-z0-9_]*)(?:\))?@PAGE(?:OFF)?')
+          def repl(m):
+              sym = m.group(1)
+              prefix = ':lo12:' if m.group(0).endswith('OFF') else ':pg_hi21:'
+              return prefix + sym
+          for f in files:
+              with open(f, 'r', errors='ignore') as fh:
+                  content = fh.read()
+              if '@PAGE' not in content:
+                  continue
+              new = sym_re.sub(repl, content)
+              with open(f, 'w') as fh:
+                  fh.write(new)
+              print("patched:", f)
+          PYEOF
+          grep -rn "@PAGE\|@PAGEOFF" . && echo "WARN remains" || echo "clean"
+
+      - name: Configure Dobby
         run: |
           cd dobby-src
           mkdir -p build && cd build
@@ -38,13 +63,62 @@ jobs:
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-29 \
             -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -100
+          echo ""
+          echo "=== CMakeCache lib-related ==="
+          grep -iE "SHARED|STATIC|BUILD|LIBRARY" CMakeCache.txt | head -40
+          echo ""
+          echo "=== Makefile targets ==="
+          grep -E "^[a-zA-Z_][a-zA-Z0-9_.-]*:" Makefile | head -40
 
-      - name: Inspect generated build files
+      - name: Build Dobby arm64
         run: |
           cd dobby-src/build
-          echo "=== Makefile targets ==="
-          grep -E "^[a-zA-Z_][a-zA-Z0-9_]*:" Makefile 2>/dev/null | head -30
-          echo "=== cmake targets ==="
-          find . -name "*.cmake" | head -20
-          echo "=== try make dry run ==="
-          make -n 2>&1 | head -60
+          make -j4 2>&1 | tail -200
+
+      - name: Inspect full build tree
+        if: always()
+        run: |
+          echo "=== all .a ==="
+          find dobby-src -name "*.a" -print
+          echo "=== all .so ==="
+          find dobby-src -name "*.so" -print
+          echo "=== dobby.h ==="
+          find dobby-src -name "dobby.h" -print
+          echo "=== build dir tree ==="
+          find dobby-src/build -maxdepth 4 -type f | head -80
+          echo "=== executable files in build ==="
+          find dobby-src/build -type f -executable | head -30
+
+      - name: Copy Dobby prebuilt
+        if: always()
+        run: |
+          mkdir -p dobby/include
+          LIB=$(find dobby-src -name "libdobby*.a" | head -n 1)
+          if [ -z "$LIB" ]; then LIB=$(find dobby-src -name "libdobby*.so" | head -n 1); fi
+          if [ -z "$LIB" ]; then echo "ERROR: no library"; exit 1; fi
+          echo "picked: $LIB"
+          cp "$LIB" dobby/
+          INC=$(find dobby-src -name "dobby.h" | head -n 1)
+          if [ -z "$INC" ]; then echo "ERROR: no dobby.h"; exit 1; fi
+          cp "$INC" dobby/include/dobby.h
+          find dobby -type f -print
+
+      - name: Build ff_antiban.so
+        if: always()
+        run: |
+          chmod +x ./build_antiban.sh
+          ANDROID_NDK=${{ steps.ndk.outputs.ndk-path }} ./build_antiban.sh 2>&1 | tail -100 || echo "build ff_antiban failed"
+
+      - name: Verify output
+        if: always()
+        run: |
+          ls -la ff_antiban.so 2>/dev/null || echo "no .so produced"
+          file ff_antiban.so 2>/dev/null || true
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ff_antiban-arm64
+          path: ff_antiban.so
+          if-no-files-found: warn
