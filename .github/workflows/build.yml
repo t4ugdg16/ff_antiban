@@ -15,18 +15,12 @@ jobs:
         with:
           ndk-version: r25c
 
-      - name: Clone Dobby
+      - name: Clone Dobby with submodules
         run: |
-          git clone --depth 1 https://github.com/jmpews/Dobby.git dobby-src
+          git clone https://github.com/jmpews/Dobby.git dobby-src
           cd dobby-src
-          echo "=== commit ==="
+          git submodule update --init --recursive
           git log -1 --oneline
-          echo "=== CMakeLists head 60 ==="
-          head -60 CMakeLists.txt
-          echo "=== Android.mk? ==="
-          find . -maxdepth 3 -name "Android.mk" -print
-          echo "=== cmake dir? ==="
-          ls -la cmake/ 2>/dev/null || echo "none"
 
       - name: Patch Dobby asm Apple to GNU
         run: |
@@ -62,44 +56,46 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-29 \
-            -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -100
-          echo ""
-          echo "=== CMakeCache lib-related ==="
-          grep -iE "SHARED|STATIC|BUILD|LIBRARY" CMakeCache.txt | head -40
-          echo ""
-          echo "=== Makefile targets ==="
-          grep -E "^[a-zA-Z_][a-zA-Z0-9_.-]*:" Makefile | head -40
+            -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build Dobby arm64
+      - name: Build Dobby static
         run: |
           cd dobby-src/build
-          make -j4 2>&1 | tail -200
+          make -j4 dobby_static 2>&1 | tail -200
+          echo ""
+          echo "=== all .a after build ==="
+          find .. -name "*.a" -print
+          echo "=== all .so after build ==="
+          find .. -name "*.so" -print
 
-      - name: Inspect full build tree
+      - name: Locate Dobby outputs
         if: always()
         run: |
-          echo "=== all .a ==="
+          echo "=== .a ==="
           find dobby-src -name "*.a" -print
-          echo "=== all .so ==="
+          echo "=== .so ==="
           find dobby-src -name "*.so" -print
           echo "=== dobby.h ==="
           find dobby-src -name "dobby.h" -print
-          echo "=== build dir tree ==="
-          find dobby-src/build -maxdepth 4 -type f | head -80
-          echo "=== executable files in build ==="
-          find dobby-src/build -type f -executable | head -30
 
       - name: Copy Dobby prebuilt
         if: always()
         run: |
           mkdir -p dobby/include
           LIB=$(find dobby-src -name "libdobby*.a" | head -n 1)
-          if [ -z "$LIB" ]; then LIB=$(find dobby-src -name "libdobby*.so" | head -n 1); fi
-          if [ -z "$LIB" ]; then echo "ERROR: no library"; exit 1; fi
+          if [ -z "$LIB" ]; then
+            LIB=$(find dobby-src -name "libdobby*.so" | head -n 1)
+          fi
+          if [ -z "$LIB" ]; then
+            echo "ERROR: no library found"
+            echo "listing all .a:"
+            find dobby-src -name "*.a" -print
+            exit 1
+          fi
           echo "picked: $LIB"
           cp "$LIB" dobby/
           INC=$(find dobby-src -name "dobby.h" | head -n 1)
-          if [ -z "$INC" ]; then echo "ERROR: no dobby.h"; exit 1; fi
+          if [ -z "$INC" ]; then echo "ERROR: dobby.h not found"; exit 1; fi
           cp "$INC" dobby/include/dobby.h
           find dobby -type f -print
 
