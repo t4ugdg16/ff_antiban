@@ -1,0 +1,48 @@
+name: Build ff_antiban
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NDK r25c
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r25c
+
+      - name: Clone Dobby
+        run: git clone --depth 1 https://github.com/jmpews/Dobby.git dobby-src
+
+      - name: Build Dobby arm64
+        run: |
+          cd dobby-src
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release
+          make -j4
+
+      - name: Copy Dobby prebuilt
+        run: |
+          mkdir -p dobby/include dobby
+          cp -r dobby-src/include/* dobby/include/
+          find dobby-src/build -name "libdobby.a" -exec cp {} dobby/libdobby.a \;
+          ls -la dobby/
+
+      - name: Build ff_antiban.so
+        run: |
+          chmod +x "./Build antiban"
+          ANDROID_NDK=${{ steps.ndk.outputs.ndk-path }} ./"Build antiban"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ff_antiban-arm64
+          path: ff_antiban.so
