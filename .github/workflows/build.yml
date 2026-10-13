@@ -18,6 +18,17 @@ jobs:
       - name: Clone Dobby
         run: git clone --depth 1 https://github.com/jmpews/Dobby.git dobby-src
 
+      - name: Patch Dobby asm for Linux cross-compile
+        run: |
+          cd dobby-src
+          find . -type f \( -name "*.S" -o -name "*.s" -o -name "*.asm" \) -print0 | while IFS= read -r -d '' f; do
+            echo "patching: $f"
+            sed -i 's/@PAGE/:pg_hi21:/g' "$f"
+            sed -i 's/@PAGEOFF/:lo12:/g' "$f"
+          done
+          echo "=== verify ==="
+          grep -rn "pg_hi21\|lo12\|@PAGE\|@PAGEOFF" source/ | head -30
+
       - name: Build Dobby arm64
         run: |
           cd dobby-src
