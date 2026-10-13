@@ -18,19 +18,46 @@ jobs:
       - name: Clone Dobby
         run: |
           git clone --depth 1 https://github.com/jmpews/Dobby.git dobby-src
-          cd dobby-src
-          git rev-parse HEAD
+          cd dobby-src && git rev-parse HEAD
 
-      - name: Patch Dobby asm for Linux cross-compile
+      - name: Patch Dobby asm Apple to GNU
         run: |
           cd dobby-src
-          find . -type f \( -name "*.S" -o -name "*.s" -o -name "*.asm" \) -print0 | while IFS= read -r -d '' f; do
-            sed -i 's/, \([A-Za-z_][A-Za-z0-9_]*\)@PAGE/, :pg_hi21:\1/g' "$f"
-            sed -i 's/, \([A-Za-z_][A-Za-z0-9_]*\)@PAGEOFF/, :lo12:\1/g' "$f"
-          done
-          echo "=== verify ==="
+          python3 - <<'PYEOF'
+          import glob, re, sys
+          files = []
+          for pat in ["**/*.S", "**/*.s", "**/*.asm"]:
+              files.extend(glob.glob(pat, recursive=True))
+          files = list(set(files))
+          print("files to scan:", len(files))
+          sym_re = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)@PAGE(?:OFF)?')
+          patched = 0
+          for f in files:
+              try:
+                  with open(f, 'r', errors='ignore') as fh:
+                      content = fh.read()
+              except Exception as e:
+                  print("skip", f, e)
+                  continue
+              if '@PAGE' not in content:
+                  continue
+              def repl(m):
+                  sym = m.group(1)
+                  return (':lo12:' if m.group(0).endswith('OFF') else ':pg_hi21:') + sym
+              new = sym_re.sub(repl, content)
+              with open(f, 'w') as fh:
+                  fh.write(new)
+              print("patched:", f)
+              patched += 1
+          print("total patched:", patched)
+          PYEOF
+          echo "=== remaining Apple syntax ==="
+          if grep -rn "@PAGE\|@PAGEOFF" . ; then
+            echo "ERROR: Apple syntax still present"
+            exit 1
+          fi
+          echo "=== patched samples ==="
           grep -rn "pg_hi21\|lo12" source/ | head -20
-          grep -rn "@PAGE\|@PAGEOFF" source/ || echo "no Apple syntax remaining"
 
       - name: Build Dobby arm64
         run: |
@@ -43,12 +70,32 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
           make -j4
 
+      - name: Locate libdobby.a
+        run: |
+          echo "=== search libdobby.a ==="
+          find dobby-src -name "libdobby.a" -print
+          echo "=== search dobby.h ==="
+          find dobby-src -name "dobby.h" -print
+
       - name: Copy Dobby prebuilt
         run: |
           mkdir -p dobby
-          cp -r dobby-src/include dobby/include
-          find dobby-src/build -name "libdobby.a" -exec cp {} dobby/libdobby.a \;
-          ls -laR dobby/ | head -60
+          LIB=$(find dobby-src -name "libdobby.a" | head -n 1)
+          if [ -z "$LIB" ]; then
+            echo "ERROR: libdobby.a not found"
+            exit 1
+          fi
+          cp "$LIB" dobby/libdobby.a
+          INC=$(find dobby-src -name "dobby.h" | head -n 1)
+          if [ -z "$INC" ]; then
+            echo "ERROR: dobby.h not found"
+            exit 1
+          fi
+          mkdir -p dobby/include
+          cp "$INC" dobby/include/dobby.h
+          echo "=== dobby/ ==="
+          find dobby -type f -print
+          ls -la dobby/ dobby/include/
 
       - name: Build ff_antiban.so
         run: |
@@ -59,6 +106,7 @@ jobs:
         run: |
           ls -la ff_antiban.so
           file ff_antiban.so
+          ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d ff_antiban.so || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
